@@ -37,6 +37,12 @@
 
 ***<img width="400" height="290" alt="45da66cf11b3111d02fddcf051f6fe1b" src="https://github.com/user-attachments/assets/e0079695-0da5-40ef-bbac-aa32116087b0" />***
 
+
+## ❓ 如何获取 .ics 文件？
+
+将你的课表导入课表软件（如 **Wakeup课程表** 或类似应用），然后从软件的设置中选择“导出”，并导出为日历文件（通常文件后缀为 `.ics`），即可获得所需文件。
+
+
 ## ⚙️ 文件结构
 
 *   `main.py`: 插件主逻辑文件。
@@ -49,6 +55,7 @@
 
 
 欢迎提交 Pull Request 或 Issue 来改进这个插件！
+
 
 
 
