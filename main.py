@@ -7,19 +7,46 @@ import time
 import tempfile
 from io import BytesIO
 from typing import Dict, List
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date, time as dt_time
 from icalendar import Calendar
 from PIL import Image, ImageDraw, ImageFont
+from dateutil.rrule import rrulestr
 from astrbot.core.star import Star, Context, StarTools
 from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.event.filter import event_message_type, EventMessageType
+from astrbot.api.message_components import At
 from astrbot.core.utils.io import download_file
 from pathlib import Path
 
 
 class Main(Star):
     """课程表插件"""
+    # --- Group Schedule Image Styles ---
+    GS_BG_COLOR = "#FFFFFF"
+    GS_FONT_COLOR = "#333333"
+    GS_TITLE_COLOR = "#000000"
+    GS_SUBTITLE_COLOR = "#888888"
+    GS_STATUS_COLORS = {
+        "进行中": ("#D32F2F", "#FFFFFF"),
+        "下一节": ("#1976D2", "#FFFFFF"),
+        "已结束": ("#388E3C", "#FFFFFF"),
+        "无课程": ("#757575", "#FFFFFF"),
+    }
+    GS_AVATAR_SIZE = 80
+    GS_ROW_HEIGHT = 120
+    GS_PADDING = 40
+    GS_WIDTH = 800
+
+    # --- User Schedule Image Styles ---
+    US_BG_COLOR = "#FFFFFF"
+    US_FONT_COLOR = "#333333"
+    US_TITLE_COLOR = "#000000"
+    US_SUBTITLE_COLOR = "#888888"
+    US_COURSE_BG_COLOR = "#E3F2FD"
+    US_ROW_HEIGHT = 100
+    US_PADDING = 40
+    US_WIDTH = 800
 
     def __init__(self, context: Context) -> None:
         super().__init__(context)
@@ -33,6 +60,10 @@ class Main(Star):
         self._init_data()
         self.user_data = self._load_user_data()
         self.binding_requests: Dict[str, Dict] = {}
+        self.course_cache: Dict[str, List[Dict]] = {}
+        self.reminders: Dict[str, bool] = {}  # 新增：用于存储提醒状态
+        # 启动后台提醒任务
+        asyncio.create_task(self._reminder_task())
 
     @filter.command("绑定课表")
     async def bind_schedule(self, event: AstrMessageEvent):
@@ -92,7 +123,7 @@ class Main(Star):
 
 
         nickname = request.get("nickname", user_id)
-        ics_file_path = self.ics_path / f"{user_id}_{nickname}_{group_id}.ics"
+        ics_file_path = self.ics_path / f"{user_id}_{group_id}.ics"
 
         try:
             # 使用File组件的异步方法获取文件
@@ -134,50 +165,121 @@ class Main(Star):
 
         # 保存用户数据
         if group_id not in self.user_data:
-            self.user_data[group_id] = {}
-        self.user_data[group_id][user_id] = nickname
+            self.user_data[group_id] = {"umo": event.unified_msg_origin, "users": {}}
+        elif "umo" not in self.user_data[group_id]:
+            self.user_data[group_id]["umo"] = event.unified_msg_origin
+
+        self.user_data[group_id]["users"][user_id] = {
+            "nickname": nickname,
+            "reminder": self.user_data[group_id]["users"].get(user_id, {}).get("reminder", False)
+        }
 
         self._save_user_data()
+
+        # 清除该用户的课表缓存
+        if str(ics_file_path) in self.course_cache:
+            del self.course_cache[str(ics_file_path)]
 
         # 删除绑定请求
         del self.binding_requests[request_key]
         yield event.plain_result(f"课表绑定成功！群号：{group_id}")
 
+    @filter.command("开启上课提醒")
+    async def enable_reminders(self, event: AstrMessageEvent):
+        """开启上课提醒"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+
+        if (not group_id or group_id not in self.user_data or
+                user_id not in self.user_data[group_id].get("users", {})):
+            yield event.plain_result("你还没有绑定课表，无法开启提醒。")
+            return
+
+        self.user_data[group_id]["users"][user_id]["reminder"] = True
+        self._save_user_data()
+        yield event.plain_result("上课提醒已开启。")
+
+    @filter.command("关闭上课提醒")
+    async def disable_reminders(self, event: AstrMessageEvent):
+        """关闭上课提醒"""
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+
+        if (not group_id or group_id not in self.user_data or
+                user_id not in self.user_data[group_id].get("users", {})):
+            yield event.plain_result("你还没有绑定课表，无法关闭提醒。")
+            return
+
+        self.user_data[group_id]["users"][user_id]["reminder"] = False
+        self._save_user_data()
+        yield event.plain_result("上课提醒已关闭。")
     def _parse_ics_file(self, file_path: str) -> List[Dict]:
-        """解析 .ics 文件并返回课程列表"""
+        """解析 .ics 文件并返回课程列表，包括重复事件。使用缓存以提高性能。"""
+        # 检查缓存
+        if file_path in self.course_cache:
+            return self.course_cache[file_path]
+
         courses = []
-        with open(file_path, "r", encoding="utf-8") as f:
-            cal = Calendar.from_ical(f.read())
-            for component in cal.walk():
-                if component.name == "VEVENT":
-                    summary = component.get("summary")
-                    description = component.get("description")
-                    location = component.get("location")
-                    dtstart = component.get("dtstart").dt
-                    dtend = component.get("dtend").dt
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                cal_content = f.read()
+        except (FileNotFoundError, IOError) as e:
+            logger.error(f"无法读取 ICS 文件 {file_path}: {e}")
+            return []
 
-                    # 确保 datetime 对象有时区信息，如果没有则添加 UTC 时区
-                    if hasattr(dtstart, "tzinfo") and dtstart.tzinfo is not None:
-                        # 如果有时区信息，转换为 UTC
-                        dtstart = dtstart.astimezone(timezone(timedelta(hours=8)))
-                    else:
-                        # 如果没有时区信息，假设是 UTC
-                        dtstart = dtstart.replace(tzinfo=timezone(timedelta(hours=8)))
+        cal = Calendar.from_ical(cal_content)
+        shanghai_tz = timezone(timedelta(hours=8))
+        today = datetime.now(shanghai_tz).date()
 
-                    if hasattr(dtend, "tzinfo") and dtend.tzinfo is not None:
-                        # 如果有时区信息，转换为 UTC
-                        dtend = dtend.astimezone(timezone(timedelta(hours=8)))
-                    else:
-                        # 如果没有时区信息，假设是 UTC
-                        dtend = dtend.replace(tzinfo=timezone(timedelta(hours=8)))
+        for component in cal.walk():
+            if component.name == "VEVENT":
+                summary = component.get("summary")
+                description = component.get("description")
+                location = component.get("location")
+                dtstart = component.get("dtstart").dt
+                dtend = component.get("dtend").dt
+                rrule_str = component.get("rrule")
 
-                    courses.append({
-                        "summary": summary,
-                        "description": description,
-                        "location": location,
-                        "start_time": dtstart,
-                        "end_time": dtend
-                    })
+                if isinstance(dtstart, date) and not isinstance(dtstart, datetime):
+                    dtstart = datetime.combine(dtstart, dt_time.min)
+                if isinstance(dtend, date) and not isinstance(dtend, datetime):
+                    dtend = datetime.combine(dtend, dt_time.min)
+
+                dtstart = dtstart.astimezone(shanghai_tz) if dtstart.tzinfo else dtstart.replace(tzinfo=shanghai_tz)
+                dtend = dtend.astimezone(shanghai_tz) if dtend.tzinfo else dtend.replace(tzinfo=shanghai_tz)
+
+                course_duration = dtend - dtstart
+
+                if rrule_str:
+                    if "UNTIL" in rrule_str:
+                        until_dt = rrule_str["UNTIL"][0]
+                        if isinstance(until_dt, date) and not isinstance(until_dt, datetime):
+                            until_dt = datetime.combine(until_dt, dt_time.max)
+                        if until_dt.tzinfo is None:
+                            until_dt = until_dt.replace(tzinfo=shanghai_tz)
+                        rrule_str["UNTIL"][0] = until_dt.astimezone(timezone.utc)
+
+                    dtstart_utc = dtstart.astimezone(timezone.utc)
+                    rrule = rrulestr(rrule_str.to_ical().decode(), dtstart=dtstart_utc)
+
+                    start_of_today_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    future_limit_utc = start_of_today_utc + timedelta(days=365)
+
+                    for occurrence_utc in rrule.between(start_of_today_utc, future_limit_utc, inc=True):
+                        occurrence_local = occurrence_utc.astimezone(shanghai_tz)
+                        courses.append({
+                            "summary": summary, "description": description, "location": location,
+                            "start_time": occurrence_local, "end_time": occurrence_local + course_duration
+                        })
+                else:
+                    if dtstart.date() >= today:
+                        courses.append({
+                            "summary": summary, "description": description, "location": location,
+                            "start_time": dtstart, "end_time": dtend
+                        })
+
+        # 存入缓存
+        self.course_cache[file_path] = courses
         return courses
 
     @filter.command("查看课表")
@@ -187,14 +289,13 @@ class Main(Star):
         group_id = event.get_group_id()
 
         if (not group_id or group_id not in self.user_data or
-                user_id not in self.user_data[group_id]):
+                user_id not in self.user_data[group_id].get("users", {})):
             yield event.plain_result(
                 "你还没有在这个群绑定课表哦，请在群内发送 /绑定课表 指令，然后发送 .ics 文件来绑定。"
             )
             return
 
-        nickname = self.user_data[group_id].get(user_id, user_id)
-        ics_file_path = self.ics_path / f"{user_id}_{nickname}_{group_id}.ics"
+        ics_file_path = self.ics_path / f"{user_id}_{group_id}.ics"
         if not os.path.exists(ics_file_path):
             yield event.plain_result("课表文件不存在，可能已被删除。请重新绑定。")
             return
@@ -219,12 +320,12 @@ class Main(Star):
 
         # Add user_id to each course for image generation
         for course in today_courses:
-            course["nickname"] = self.user_data[group_id].get(user_id, user_id)
+            course["nickname"] = self.user_data[group_id]["users"].get(user_id, {}).get("nickname", user_id)
 
         image_path = await self._generate_user_schedule_image(today_courses, event.get_sender_name())
         yield event.image_result(image_path)
 
-    @filter.command("群友上什么课")
+    @filter.command("群友在上什么课")
     async def show_group_schedule(self, event: AstrMessageEvent):
         """查看群友接下来有什么课"""
         group_id = event.get_group_id()
@@ -237,8 +338,10 @@ class Main(Star):
         now = datetime.now(shanghai_tz)
         next_courses = []
 
-        for user_id, nickname in self.user_data[group_id].items():
-            ics_file_path = self.ics_path / f"{user_id}_{nickname}_{group_id}.ics"
+        group_users = self.user_data[group_id].get("users", {})
+        for user_id, user_info in group_users.items():
+            nickname = user_info.get("nickname", user_id)
+            ics_file_path = self.ics_path / f"{user_id}_{group_id}.ics"
             if not os.path.exists(ics_file_path):
                 continue
 
@@ -267,8 +370,9 @@ class Main(Star):
             # 优先显示正在上的课
             display_course = user_current_course if user_current_course else user_next_course
 
+            # 无论用户今天是否有课，都为他创建一个条目
             if display_course:
-                # 创建课程对象的深拷贝，避免引用问题
+                # 用户有课
                 user_course_copy = {
                     "summary": display_course["summary"],
                     "description": display_course["description"],
@@ -278,21 +382,35 @@ class Main(Star):
                     "user_id": user_id,
                     "nickname": nickname
                 }
-                next_courses.append(user_course_copy)
+            else:
+                # 用户今天没课
+                user_course_copy = {
+                    "summary": "今日无课",
+                    "description": "",
+                    "location": "",
+                    "start_time": None, # 标记为无课
+                    "end_time": None,
+                    "user_id": user_id,
+                    "nickname": nickname
+                }
+            next_courses.append(user_course_copy)
 
         if not next_courses:
             yield event.plain_result("群友们接下来都没有课啦！")
             return
 
-        next_courses.sort(key=lambda x: x["start_time"])
+        # 排序时，将无课的用户（start_time is None）排在最后
+        next_courses.sort(key=lambda x: (x["start_time"] is None, x["start_time"]))
 
         result_str = "接下来群友们的课程有：\n"
         for course in next_courses:
-            result_str += f"\n用户: {course['user_id']}\n"
+            result_str += f"\n用户: {course['nickname']}\n"
             result_str += f"课程名称: {course['summary']}\n"
-            result_str += (f"时间: {course['start_time'].strftime('%H:%M')} - "
-                          f"{course['end_time'].strftime('%H:%M')}\n")
-            result_str += f"地点: {course['location']}\n"
+            if course["start_time"]:
+                result_str += (f"时间: {course['start_time'].strftime('%H:%M')} - "
+                              f"{course['end_time'].strftime('%H:%M')}\n")
+            if course["location"]:
+                result_str += f"地点: {course['location']}\n"
 
         # Instead of sending plain text, we will generate and send an image.
         image_bytes = await self._generate_schedule_image(next_courses)
@@ -300,49 +418,25 @@ class Main(Star):
 
     async def _generate_schedule_image(self, courses: List[Dict]) -> str:
         """生成课程表图片并返回临时文件路径"""
-        # --- 样式配置 ---
-        BG_COLOR = "#FFFFFF"
-        FONT_COLOR = "#333333"
-        TITLE_COLOR = "#000000"
-        SUBTITLE_COLOR = "#888888"
-        STATUS_COLORS = {
-            "进行中": ("#D32F2F", "#FFFFFF"),
-            "下一节": ("#1976D2", "#FFFFFF"),
-            "已结束": ("#388E3C", "#FFFFFF"),
-            "无课程": ("#757575", "#FFFFFF"),
-        }
-        AVATAR_SIZE = 80
-        ROW_HEIGHT = 120
-        PADDING = 40
-
         # --- 动态字体加载 ---
         font_path = self._find_font_file()
-        if font_path:
-            try:
-                font_main = ImageFont.truetype(font_path, 32)
-                font_sub = ImageFont.truetype(font_path, 24)
-                font_title = ImageFont.truetype(font_path, 48)
-            except IOError:
-                logger.warning(f"无法加载字体文件: {font_path}，将使用默认字体。")
-                font_main = ImageFont.load_default()
-                font_sub = ImageFont.load_default()
-                font_title = ImageFont.load_default()
-        else:
-            logger.warning("未在插件目录中找到字体文件，将使用默认字体。")
-            font_main = ImageFont.load_default()
-            font_sub = ImageFont.load_default()
-            font_title = ImageFont.load_default()
+        try:
+            font_main = ImageFont.truetype(font_path, 32) if font_path else ImageFont.load_default()
+            font_sub = ImageFont.truetype(font_path, 24) if font_path else ImageFont.load_default()
+            font_title = ImageFont.truetype(font_path, 48) if font_path else ImageFont.load_default()
+        except IOError:
+            logger.warning(f"无法加载字体文件: {font_path}，将使用默认字体。")
+            font_main, font_sub, font_title = ImageFont.load_default(), ImageFont.load_default(), ImageFont.load_default()
 
         # --- 图像尺寸计算 ---
-        width = 800
-        height = PADDING * 2 + 120 + len(courses) * ROW_HEIGHT
-        image = Image.new("RGB", (width, height), BG_COLOR)
+        height = self.GS_PADDING * 2 + 120 + len(courses) * self.GS_ROW_HEIGHT
+        image = Image.new("RGB", (self.GS_WIDTH, height), self.GS_BG_COLOR)
         draw = ImageDraw.Draw(image)
 
         # --- 绘制标题 ---
-        draw.rectangle([PADDING, PADDING, PADDING + 20, PADDING + 60], fill="#26A69A")
-        draw.text((PADDING + 40, PADDING), "“群友在上什么课?”", font=font_title, fill=TITLE_COLOR)
-        draw.rectangle([PADDING + 40, PADDING + 70, PADDING + 40 + 300, PADDING + 75], fill="#A7FFEB")
+        draw.rectangle([self.GS_PADDING, self.GS_PADDING, self.GS_PADDING + 20, self.GS_PADDING + 60], fill="#26A69A")
+        draw.text((self.GS_PADDING + 40, self.GS_PADDING), "“群友在上什么课?”", font=font_title, fill=self.GS_TITLE_COLOR)
+        draw.rectangle([self.GS_PADDING + 40, self.GS_PADDING + 70, self.GS_PADDING + 40 + 300, self.GS_PADDING + 75], fill="#A7FFEB")
 
         # --- 获取头像 ---
         async def fetch_avatar(session, user_id):
@@ -360,7 +454,7 @@ class Main(Star):
             avatar_datas = await asyncio.gather(*tasks)
 
         # --- 绘制每一行 ---
-        y_offset = PADDING + 120
+        y_offset = self.GS_PADDING + 120
         now = datetime.now(timezone(timedelta(hours=8)))
 
         for i, course in enumerate(courses):
@@ -374,18 +468,18 @@ class Main(Star):
             avatar_data = avatar_datas[i]
             if avatar_data:
                 avatar = Image.open(BytesIO(avatar_data)).convert("RGBA")
-                avatar = avatar.resize((AVATAR_SIZE, AVATAR_SIZE))
+                avatar = avatar.resize((self.GS_AVATAR_SIZE, self.GS_AVATAR_SIZE))
 
                 # 创建圆形遮罩
-                mask = Image.new("L", (AVATAR_SIZE, AVATAR_SIZE), 0)
+                mask = Image.new("L", (self.GS_AVATAR_SIZE, self.GS_AVATAR_SIZE), 0)
                 mask_draw = ImageDraw.Draw(mask)
-                mask_draw.ellipse((0, 0, AVATAR_SIZE, AVATAR_SIZE), fill=255)
+                mask_draw.ellipse((0, 0, self.GS_AVATAR_SIZE, self.GS_AVATAR_SIZE), fill=255)
 
-                image.paste(avatar, (PADDING, y_offset + (ROW_HEIGHT - AVATAR_SIZE) // 2), mask)
+                image.paste(avatar, (self.GS_PADDING, y_offset + (self.GS_ROW_HEIGHT - self.GS_AVATAR_SIZE) // 2), mask)
 
             # --- 绘制箭头 ---
-            arrow_x = PADDING + AVATAR_SIZE + 20
-            arrow_y = y_offset + ROW_HEIGHT // 2
+            arrow_x = self.GS_PADDING + self.GS_AVATAR_SIZE + 20
+            arrow_y = y_offset + self.GS_ROW_HEIGHT // 2
             arrow_points = [
                 (arrow_x, arrow_y - 20),
                 (arrow_x + 30, arrow_y),
@@ -414,28 +508,28 @@ class Main(Star):
                         detail_text = f"{delta_minutes} 分钟后"
                 else:
                     status_text = "已结束"
-                    detail_text = "今日课程已上完"
+                    detail_text = "今日所有课程已结束"
             else:
-                status_text = "无课程"
-                detail_text = "今天地，觉宇宙之无穷"
+                status_text = "已结束"
+                detail_text = "今日所有课程已结束"
 
             # --- 绘制文本 ---
             text_x = arrow_x + 50
-            draw.text((text_x, y_offset + 15), str(nickname), font=font_main, fill=FONT_COLOR)
+            draw.text((text_x, y_offset + 15), str(nickname), font=font_main, fill=self.GS_FONT_COLOR)
 
-            status_bg, status_fg = STATUS_COLORS.get(status_text, ("#000000", "#FFFFFF"))
+            status_bg, status_fg = self.GS_STATUS_COLORS.get(status_text, ("#000000", "#FFFFFF"))
             draw.rectangle([text_x, y_offset + 60, text_x + 100, y_offset + 95], fill=status_bg)
             draw.text((text_x + 10, y_offset + 65), status_text, font=font_sub, fill=status_fg)
 
-            draw.text((text_x + 120, y_offset + 65), summary, font=font_sub, fill=FONT_COLOR)
+            draw.text((text_x + 120, y_offset + 65), summary, font=font_sub, fill=self.GS_FONT_COLOR)
             if start_time and end_time:
                 time_str = f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}"
-                draw.text((text_x + 120, y_offset + 95), f"{time_str} ({detail_text})", font=font_sub, fill=SUBTITLE_COLOR)
+                draw.text((text_x + 120, y_offset + 95), f"{time_str} ({detail_text})", font=font_sub, fill=self.GS_SUBTITLE_COLOR)
             else:
-                 draw.text((text_x + 120, y_offset + 95), detail_text, font=font_sub, fill=SUBTITLE_COLOR)
+                 draw.text((text_x + 120, y_offset + 95), detail_text, font=font_sub, fill=self.GS_SUBTITLE_COLOR)
 
 
-            y_offset += ROW_HEIGHT
+            y_offset += self.GS_ROW_HEIGHT
 
         # --- 保存到临时文件 ---
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -447,44 +541,26 @@ class Main(Star):
 
     async def _generate_user_schedule_image(self, courses: List[Dict], nickname: str) -> str:
         """为单个用户生成今日课程表图片"""
-        # --- 样式配置 ---
-        BG_COLOR = "#FFFFFF"
-        FONT_COLOR = "#333333"
-        TITLE_COLOR = "#000000"
-        SUBTITLE_COLOR = "#888888"
-        COURSE_BG_COLOR = "#E3F2FD"
-        ROW_HEIGHT = 100
-        PADDING = 40
-
         # --- 动态字体加载 ---
         font_path = self._find_font_file()
-        if font_path:
-            try:
-                font_main = ImageFont.truetype(font_path, 28)
-                font_sub = ImageFont.truetype(font_path, 22)
-                font_title = ImageFont.truetype(font_path, 40)
-            except IOError:
-                logger.warning(f"无法加载字体文件: {font_path}，将使用默认字体。")
-                font_main = ImageFont.load_default()
-                font_sub = ImageFont.load_default()
-                font_title = ImageFont.load_default()
-        else:
-            logger.warning("未在插件目录中找到字体文件，将使用默认字体。")
-            font_main = ImageFont.load_default()
-            font_sub = ImageFont.load_default()
-            font_title = ImageFont.load_default()
+        try:
+            font_main = ImageFont.truetype(font_path, 28) if font_path else ImageFont.load_default()
+            font_sub = ImageFont.truetype(font_path, 22) if font_path else ImageFont.load_default()
+            font_title = ImageFont.truetype(font_path, 40) if font_path else ImageFont.load_default()
+        except IOError:
+            logger.warning(f"无法加载字体文件: {font_path}，将使用默认字体。")
+            font_main, font_sub, font_title = ImageFont.load_default(), ImageFont.load_default(), ImageFont.load_default()
 
         # --- 图像尺寸计算 ---
-        width = 800
-        height = PADDING * 2 + 100 + len(courses) * ROW_HEIGHT
-        image = Image.new("RGB", (width, height), BG_COLOR)
+        height = self.US_PADDING * 2 + 100 + len(courses) * self.US_ROW_HEIGHT
+        image = Image.new("RGB", (self.US_WIDTH, height), self.US_BG_COLOR)
         draw = ImageDraw.Draw(image)
 
         # --- 绘制标题 ---
-        draw.text((PADDING, PADDING), f"{nickname}的今日课程", font=font_title, fill=TITLE_COLOR)
+        draw.text((self.US_PADDING, self.US_PADDING), f"{nickname}的今日课程", font=font_title, fill=self.US_TITLE_COLOR)
 
         # --- 绘制课程 ---
-        y_offset = PADDING + 100
+        y_offset = self.US_PADDING + 100
 
         for course in courses:
             summary = course.get("summary", "无课程信息")
@@ -493,20 +569,20 @@ class Main(Star):
             location = course.get("location", "未知地点")
 
             # 绘制圆角矩形背景
-            self._draw_rounded_rectangle(draw, [PADDING, y_offset, width - PADDING, y_offset + ROW_HEIGHT - 10], 10, fill=COURSE_BG_COLOR)
+            self._draw_rounded_rectangle(draw, [self.US_PADDING, y_offset, self.US_WIDTH - self.US_PADDING, y_offset + self.US_ROW_HEIGHT - 10], 10, fill=self.US_COURSE_BG_COLOR)
 
             # 绘制时间
             time_str = f"{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}"
-            draw.text((PADDING + 20, y_offset + 15), time_str, font=font_main, fill=TITLE_COLOR)
+            draw.text((self.US_PADDING + 20, y_offset + 15), time_str, font=font_main, fill=self.US_TITLE_COLOR)
 
             # 绘制课程名称和地点
-            draw.text((PADDING + 20, y_offset + 55), f"{summary} @ {location}", font=font_sub, fill=FONT_COLOR)
+            draw.text((self.US_PADDING + 20, y_offset + 55), f"{summary} @ {location}", font=font_sub, fill=self.US_FONT_COLOR)
 
-            y_offset += ROW_HEIGHT
+            y_offset += self.US_ROW_HEIGHT
 
         # --- 绘制页脚 ---
         footer_text = f"生成时间: {datetime.now().strftime('%Y/%m/%d %H:%M:%S')}"
-        draw.text((PADDING, height - PADDING), footer_text, font=font_sub, fill=SUBTITLE_COLOR)
+        draw.text((self.US_PADDING, height - self.US_PADDING), footer_text, font=font_sub, fill=self.US_SUBTITLE_COLOR)
 
         # --- 保存到临时文件 ---
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -557,3 +633,61 @@ class Main(Star):
 
     async def terminate(self):
         logger.info("Course Schedule plugin terminated.")
+
+    async def _reminder_task(self):
+        """后台任务，用于检查并发送上课提醒"""
+        self.sent_reminders = set()
+
+        while True:
+            try:
+                shanghai_tz = timezone(timedelta(hours=8))
+                now = datetime.now(shanghai_tz)
+
+                for group_id, group_data in self.user_data.items():
+                    umo = group_data.get("umo")
+                    if not umo:
+                        continue
+
+                    for user_id, user_info in group_data.get("users", {}).items():
+                        if not user_info.get("reminder"):
+                            continue
+
+                        ics_file_path = self.ics_path / f"{user_id}_{group_id}.ics"
+                        if not os.path.exists(ics_file_path):
+                            continue
+
+                        courses = self._parse_ics_file(str(ics_file_path))
+                        today_courses = [c for c in courses if c["start_time"].date() == now.date()]
+
+                        for course in today_courses:
+                            start_time = course["start_time"]
+                            time_diff = (start_time - now).total_seconds()
+
+                            # 检查是否在30分钟到31分钟之间
+                            if 1800 <= time_diff < 1860:
+                                reminder_key = (user_id, start_time.strftime("%Y-%m-%d %H:%M"))
+                                if reminder_key in self.sent_reminders:
+                                    continue
+
+                                # --- 构建并发送消息 ---
+                                course_name = course.get("summary", "未知课程")
+                                location = course.get("location", "未知地点")
+                                time_str = start_time.strftime("%H:%M")
+
+                                message_chain = [
+                                    At(user_id),
+                                    f" 上课提醒！\n\n你接下来在 {time_str} 有一节课：\n"
+                                    f"课程名称: {course_name}\n"
+                                    f"上课地点: {location}\n\n"
+                                    "请做好准备！"
+                                ]
+
+                                await self.context.send_message(umo, message_chain)
+                                self.sent_reminders.add(reminder_key)
+                                logger.info(f"Sent reminder to {user_id} in group {group_id} for course {course_name}")
+
+            except Exception as e:
+                logger.error(f"Error in reminder task: {e}")
+
+            # 每60秒检查一次
+            await asyncio.sleep(60)
