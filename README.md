@@ -34,6 +34,7 @@
 
 
 **个人课表样式 (`/查看课表`)**
+
 ***<img width="400" height="290" alt="45da66cf11b3111d02fddcf051f6fe1b" src="https://github.com/user-attachments/assets/e0079695-0da5-40ef-bbac-aa32116087b0" />***
 
 ## ⚙️ 文件结构
@@ -48,5 +49,6 @@
 
 
 欢迎提交 Pull Request 或 Issue 来改进这个插件！
+
 
 
