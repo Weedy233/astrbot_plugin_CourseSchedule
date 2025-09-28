@@ -1,4 +1,4 @@
-name: Astrbot_plugin_CourseSchedule
+name: astrbot_plugin_CourseSchedule
 desc: 一个用于绑定、查询和分享课程表的插件
 author: Jason.Joestar
 version: 1.0.0
