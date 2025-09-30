@@ -32,13 +32,16 @@
 ## 🖼️ 效果预览
 
 **群友课表样式 (`/群友在上什么课`)**
-*(这里可以放一张群友课表的截图)*
+
+*<img width="800" height="440" alt="ccee4521fc5822da47458ff04c3086d0" src="https://github.com/user-attachments/assets/a4d71e19-43ed-4449-a889-4eeca370c118" />*
 
 **个人课表样式 (`/查看课表`)**
-*(这里可以放一张个人课表的截图)*
+
+*<img width="800" height="380" alt="d17a5c9144750086f306a21e795c611b" src="https://github.com/user-attachments/assets/8209ce65-09fd-4373-9100-1fbfbf8ceeb9" />*
 
 **排行榜样式 (`/本周上课排行`)**
-*(这里可以放一张排行榜的截图)*
+
+*<img width="900" height="460" alt="6b2ef146e07647930297672739e15249" src="https://github.com/user-attachments/assets/ce893ac1-cfca-479d-9924-00e2e017249b" />*
 
 ## ⚙️ 文件结构
 
@@ -52,5 +55,6 @@
 *   `README.md`: 你正在阅读的这个文件。
 
 ## 🤝 贡献
+
 
 欢迎提交 Pull Request 或 Issue 来改进这个插件！
