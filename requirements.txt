@@ -1,3 +1,4 @@
 icalendar
 Pillow
 aiohttp
+python-dateutil
