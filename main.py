@@ -402,6 +402,80 @@ class Main(Star):
         image_bytes = await self.image_generator.generate_schedule_image(next_courses)
         yield event.image_result(image_bytes)
 
+    @filter.command("群友明天上什么课")
+    async def show_group_tomorrow_schedule(self, event: AstrMessageEvent):
+        """查看群友明天有什么课"""
+        group_id = event.get_group_id()
+        if not group_id or group_id not in self.user_data:
+            yield event.plain_result("本群还没有人绑定课表哦。")
+            return
+
+        # 使用上海时区 (UTC+8)
+        shanghai_tz = timezone(timedelta(hours=8))
+        now = datetime.now(shanghai_tz)
+        tomorrow = now.date() + timedelta(days=1)  # 明天的日期
+        next_courses = []
+
+        group_users = self.user_data[group_id].get("users", {})
+        for user_id, user_info in group_users.items():
+            nickname = user_info.get("nickname", user_id)
+            ics_file_path = self.data_manager.get_ics_file_path(user_id, group_id)
+            if not os.path.exists(ics_file_path):
+                continue
+
+            courses = self.ics_parser.parse_ics_file(str(ics_file_path))
+            
+            # 只筛选明天的课程
+            tomorrow_courses = [
+                c
+                for c in courses
+                if c.get("start_time") and c.get("start_time").date() == tomorrow
+            ]
+
+            # 找到明天最早的课程
+            user_next_course = None
+            for course in tomorrow_courses:
+                start_time = course.get("start_time")
+                if start_time:
+                    # 找到最早的课程
+                    if user_next_course is None or start_time < user_next_course.get("start_time"):
+                        user_next_course = course
+
+            # 为用户创建课程条目
+            if user_next_course:
+                # 用户明天有课
+                user_course_copy = {
+                    "summary": user_next_course["summary"],
+                    "description": user_next_course["description"],
+                    "location": user_next_course["location"],
+                    "start_time": user_next_course["start_time"],
+                    "end_time": user_next_course["end_time"],
+                    "user_id": user_id,
+                    "nickname": nickname,
+                }
+            else:
+                # 用户明天没课
+                user_course_copy = {
+                    "summary": "明日无课",
+                    "description": "",
+                    "location": "",
+                    "start_time": None,  # 标记为无课
+                    "end_time": None,
+                    "user_id": user_id,
+                    "nickname": nickname,
+                }
+            next_courses.append(user_course_copy)
+
+        if not next_courses:
+            yield event.plain_result("群友们明天都没有课啦！")
+            return
+
+        # 排序时，将无课的用户（start_time is None）排在最后
+        next_courses.sort(key=lambda x: (x["start_time"] is None, x["start_time"]))
+
+        image_bytes = await self.image_generator.generate_schedule_image(next_courses)
+        yield event.image_result(image_bytes)
+
     @filter.command("本周上课排行")
     async def weekly_course_ranking(self, event: AstrMessageEvent):
         """生成本周上课排行榜"""
