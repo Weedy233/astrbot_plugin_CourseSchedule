@@ -243,9 +243,9 @@ class ImageGenerator:
         return temp_path
 
     async def generate_user_schedule_image(
-        self, courses: List[Dict], nickname: str
+        self, courses: List[Dict], nickname: str, title_suffix: str = "的今日课程"
     ) -> str:
-        """为单个用户生成今日课程表图片"""
+        """为单个用户生成课程表图片"""
         height = c.US_PADDING * 2 + 100 + len(courses) * c.US_ROW_HEIGHT
         image = Image.new("RGB", (c.US_WIDTH, height), c.US_BG_COLOR)
         draw = ImageDraw.Draw(image)
@@ -253,7 +253,7 @@ class ImageGenerator:
         sanitized_nickname = self._sanitize_for_pil(nickname, self.user_font_title)
         draw.text(
             (c.US_PADDING, c.US_PADDING),
-            f"{sanitized_nickname}的今日课程",
+            f"{sanitized_nickname}{title_suffix}",
             font=self.user_font_title,
             fill=c.US_TITLE_COLOR,
         )

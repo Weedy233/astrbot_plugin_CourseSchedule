@@ -256,7 +256,60 @@ class Main(Star):
             course["nickname"] = nickname
 
         image_path = await self.image_generator.generate_user_schedule_image(
-            today_courses, event.get_sender_name()
+            today_courses, event.get_sender_name(), "的今日课程"
+        )
+        yield event.image_result(image_path)
+
+    @filter.command("查看明日课表")
+    async def show_tomorrow_schedule(self, event: AstrMessageEvent):
+        """查看明天还有什么课"""
+        user_id = event.get_sender_id()
+        group_id = event.get_group_id()
+
+        if (
+            not group_id
+            or group_id not in self.user_data
+            or user_id not in self.user_data[group_id].get("users", {})
+        ):
+            yield event.plain_result(
+                "你还没有在这个群绑定课表哦，请在群内发送 /绑定课表 指令，然后发送 .ics 文件来绑定。"
+            )
+            return
+
+        ics_file_path = self.data_manager.get_ics_file_path(user_id, group_id)
+        if not os.path.exists(ics_file_path):
+            yield event.plain_result("课表文件不存在，可能已被删除。请重新绑定。")
+            return
+
+        courses = self.ics_parser.parse_ics_file(str(ics_file_path))
+        # 使用上海时区 (UTC+8)
+        shanghai_tz = timezone(timedelta(hours=8))
+        now = datetime.now(shanghai_tz)
+        tomorrow = now.date() + timedelta(days=1)
+
+        tomorrow_courses = []
+        for course in courses:
+            if course["start_time"].date() == tomorrow:
+                tomorrow_courses.append(course)
+
+        if not tomorrow_courses:
+            yield event.plain_result("你明天没有课啦！")
+            return
+
+        # Sort courses by start time
+        tomorrow_courses.sort(key=lambda x: x["start_time"])
+
+        # Add user_id to each course for image generation
+        for course in tomorrow_courses:
+            nickname = (
+                self.user_data[group_id]["users"]
+                .get(user_id, {})
+                .get("nickname", user_id)
+            )
+            course["nickname"] = nickname
+
+        image_path = await self.image_generator.generate_user_schedule_image(
+            tomorrow_courses, event.get_sender_name(), "的明日课程"
         )
         yield event.image_result(image_path)
 
