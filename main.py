@@ -12,6 +12,7 @@ from astrbot.core.utils.io import download_file
 from .data_manager import DataManager
 from .ics_parser import ICSParser
 from .image_generator import ImageGenerator
+from .schedule_helper import ScheduleHelper
 
 
 class Main(Star):
@@ -24,6 +25,7 @@ class Main(Star):
         self.ics_parser = ICSParser()
         self.image_generator = ImageGenerator()
         self.user_data = self.data_manager.load_user_data()
+        self.schedule_helper = ScheduleHelper(self.data_manager, self.ics_parser, self.image_generator, self.user_data)
         self.binding_requests: Dict[str, Dict] = {}
 
     @filter.command("绑定课表")
@@ -211,193 +213,54 @@ class Main(Star):
     @filter.command("查看课表")
     async def show_today_schedule(self, event: AstrMessageEvent):
         """查看今天还有什么课"""
-        user_id = event.get_sender_id()
-        group_id = event.get_group_id()
-
-        if (
-            not group_id
-            or group_id not in self.user_data
-            or user_id not in self.user_data[group_id].get("users", {})
-        ):
-            yield event.plain_result(
-                "你还没有在这个群绑定课表哦，请在群内发送 /绑定课表 指令，然后发送 .ics 文件来绑定。"
-            )
-            return
-
-        ics_file_path = self.data_manager.get_ics_file_path(user_id, group_id)
-        if not os.path.exists(ics_file_path):
-            yield event.plain_result("课表文件不存在，可能已被删除。请重新绑定。")
-            return
-
-        courses = self.ics_parser.parse_ics_file(str(ics_file_path))
-        today_courses = []
         # 使用上海时区 (UTC+8)
         shanghai_tz = timezone(timedelta(hours=8))
         now = datetime.now(shanghai_tz)
+        today = now.date()
 
-        for course in courses:
-            if course["start_time"].date() == now.date() and course["start_time"] > now:
-                today_courses.append(course)
+        courses, error_msg = await self.schedule_helper.get_schedule_for_date(event, today, "的今日课程")
 
-        if not today_courses:
-            yield event.plain_result("你今天没有课啦！")
+        if error_msg:
+            yield event.plain_result(error_msg)
             return
 
-        # Sort courses by start time
-        today_courses.sort(key=lambda x: x["start_time"])
-
-        # Add user_id to each course for image generation
-        for course in today_courses:
-            nickname = (
-                self.user_data[group_id]["users"]
-                .get(user_id, {})
-                .get("nickname", user_id)
-            )
-            course["nickname"] = nickname
-
         image_path = await self.image_generator.generate_user_schedule_image(
-            today_courses, event.get_sender_name(), "的今日课程"
+            courses, event.get_sender_name(), "的今日课程"
         )
         yield event.image_result(image_path)
 
     @filter.command("查看明日课表")
     async def show_tomorrow_schedule(self, event: AstrMessageEvent):
         """查看明天还有什么课"""
-        user_id = event.get_sender_id()
-        group_id = event.get_group_id()
-
-        if (
-            not group_id
-            or group_id not in self.user_data
-            or user_id not in self.user_data[group_id].get("users", {})
-        ):
-            yield event.plain_result(
-                "你还没有在这个群绑定课表哦，请在群内发送 /绑定课表 指令，然后发送 .ics 文件来绑定。"
-            )
-            return
-
-        ics_file_path = self.data_manager.get_ics_file_path(user_id, group_id)
-        if not os.path.exists(ics_file_path):
-            yield event.plain_result("课表文件不存在，可能已被删除。请重新绑定。")
-            return
-
-        courses = self.ics_parser.parse_ics_file(str(ics_file_path))
         # 使用上海时区 (UTC+8)
         shanghai_tz = timezone(timedelta(hours=8))
         now = datetime.now(shanghai_tz)
         tomorrow = now.date() + timedelta(days=1)
 
-        tomorrow_courses = []
-        for course in courses:
-            if course["start_time"].date() == tomorrow:
-                tomorrow_courses.append(course)
+        courses, error_msg = await self.schedule_helper.get_schedule_for_date(event, tomorrow, "的明日课程")
 
-        if not tomorrow_courses:
-            yield event.plain_result("你明天没有课啦！")
+        if error_msg:
+            yield event.plain_result(error_msg)
             return
 
-        # Sort courses by start time
-        tomorrow_courses.sort(key=lambda x: x["start_time"])
-
-        # Add user_id to each course for image generation
-        for course in tomorrow_courses:
-            nickname = (
-                self.user_data[group_id]["users"]
-                .get(user_id, {})
-                .get("nickname", user_id)
-            )
-            course["nickname"] = nickname
-
         image_path = await self.image_generator.generate_user_schedule_image(
-            tomorrow_courses, event.get_sender_name(), "的明日课程"
+            courses, event.get_sender_name(), "的明日课程"
         )
         yield event.image_result(image_path)
 
     @filter.command("群友在上什么课")
     async def show_group_now_schedule(self, event: AstrMessageEvent):
         """查看群友接下来有什么课"""
-        group_id = event.get_group_id()
-        if not group_id or group_id not in self.user_data:
-            yield event.plain_result("本群还没有人绑定课表哦。")
-            return
-
         # 使用上海时区 (UTC+8)
         shanghai_tz = timezone(timedelta(hours=8))
         now = datetime.now(shanghai_tz)
-        next_courses = []
+        today = now.date()
 
-        group_users = self.user_data[group_id].get("users", {})
-        for user_id, user_info in group_users.items():
-            nickname = user_info.get("nickname", user_id)
-            ics_file_path = self.data_manager.get_ics_file_path(user_id, group_id)
-            if not os.path.exists(ics_file_path):
-                continue
+        next_courses, error_msg = await self.schedule_helper.get_group_schedule_for_date(event, today, is_today=True)
 
-            courses = self.ics_parser.parse_ics_file(str(ics_file_path))
-            user_current_course = None
-            user_next_course = None
-
-            # 只筛选当天的课程进行判断
-            today_courses = [
-                c
-                for c in courses
-                if c.get("start_time") and c.get("start_time").date() == now.date()
-            ]
-
-            for course in today_courses:
-                start_time = course.get("start_time")
-                end_time = course.get("end_time")
-
-                if start_time and end_time:
-                    # 检查是否是正在进行的课程
-                    if start_time <= now < end_time:
-                        user_current_course = course
-                        break  # 找到正在上的课，就不需要再找下一节了
-
-                    # 检查是否是未来的课程
-                    elif start_time > now:
-                        if (
-                            user_next_course is None
-                            or start_time < user_next_course.get("start_time")
-                        ):
-                            user_next_course = course
-
-            # 优先显示正在上的课
-            display_course = (
-                user_current_course if user_current_course else user_next_course
-            )
-
-            # 无论用户今天是否有课，都为他创建一个条目
-            if display_course:
-                # 用户有课
-                user_course_copy = {
-                    "summary": display_course["summary"],
-                    "description": display_course["description"],
-                    "location": display_course["location"],
-                    "start_time": display_course["start_time"],
-                    "end_time": display_course["end_time"],
-                    "user_id": user_id,
-                    "nickname": nickname,
-                }
-            else:
-                # 用户今天没课
-                user_course_copy = {
-                    "summary": "今日无课",
-                    "description": "",
-                    "location": "",
-                    "start_time": None,  # 标记为无课
-                    "end_time": None,
-                    "user_id": user_id,
-                    "nickname": nickname,
-                }
-            next_courses.append(user_course_copy)
-
-        if not next_courses:
-            yield event.plain_result("群友们接下来都没有课啦！")
+        if error_msg:
+            yield event.plain_result(error_msg)
             return
-
-        # 排序时，将无课的用户（start_time is None）排在最后
-        next_courses.sort(key=lambda x: (x["start_time"] is None, x["start_time"]))
 
         image_bytes = await self.image_generator.generate_schedule_image(next_courses, date_type="today")
         yield event.image_result(image_bytes)
@@ -405,73 +268,16 @@ class Main(Star):
     @filter.command("群友明天上什么课")
     async def show_group_tomorrow_schedule(self, event: AstrMessageEvent):
         """查看群友明天有什么课"""
-        group_id = event.get_group_id()
-        if not group_id or group_id not in self.user_data:
-            yield event.plain_result("本群还没有人绑定课表哦。")
-            return
-
         # 使用上海时区 (UTC+8)
         shanghai_tz = timezone(timedelta(hours=8))
         now = datetime.now(shanghai_tz)
         tomorrow = now.date() + timedelta(days=1)  # 明天的日期
-        next_courses = []
 
-        group_users = self.user_data[group_id].get("users", {})
-        for user_id, user_info in group_users.items():
-            nickname = user_info.get("nickname", user_id)
-            ics_file_path = self.data_manager.get_ics_file_path(user_id, group_id)
-            if not os.path.exists(ics_file_path):
-                continue
+        next_courses, error_msg = await self.schedule_helper.get_group_schedule_for_date(event, tomorrow, is_today=False)
 
-            courses = self.ics_parser.parse_ics_file(str(ics_file_path))
-            
-            # 只筛选明天的课程
-            tomorrow_courses = [
-                c
-                for c in courses
-                if c.get("start_time") and c.get("start_time").date() == tomorrow
-            ]
-
-            # 找到明天最早的课程
-            user_next_course = None
-            for course in tomorrow_courses:
-                start_time = course.get("start_time")
-                if start_time:
-                    # 找到最早的课程
-                    if user_next_course is None or start_time < user_next_course.get("start_time"):
-                        user_next_course = course
-
-            # 为用户创建课程条目
-            if user_next_course:
-                # 用户明天有课
-                user_course_copy = {
-                    "summary": user_next_course["summary"],
-                    "description": user_next_course["description"],
-                    "location": user_next_course["location"],
-                    "start_time": user_next_course["start_time"],
-                    "end_time": user_next_course["end_time"],
-                    "user_id": user_id,
-                    "nickname": nickname,
-                }
-            else:
-                # 用户明天没课
-                user_course_copy = {
-                    "summary": "明日无课",
-                    "description": "",
-                    "location": "",
-                    "start_time": None,  # 标记为无课
-                    "end_time": None,
-                    "user_id": user_id,
-                    "nickname": nickname,
-                }
-            next_courses.append(user_course_copy)
-
-        if not next_courses:
-            yield event.plain_result("群友们明天都没有课啦！")
+        if error_msg:
+            yield event.plain_result(error_msg)
             return
-
-        # 排序时，将无课的用户（start_time is None）排在最后
-        next_courses.sort(key=lambda x: (x["start_time"] is None, x["start_time"]))
 
         image_bytes = await self.image_generator.generate_schedule_image(next_courses, date_type="tomorrow")
         yield event.image_result(image_bytes)
