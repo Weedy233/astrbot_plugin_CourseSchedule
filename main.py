@@ -314,7 +314,7 @@ class Main(Star):
         yield event.image_result(image_path)
 
     @filter.command("群友在上什么课")
-    async def show_group_schedule(self, event: AstrMessageEvent):
+    async def show_group_now_schedule(self, event: AstrMessageEvent):
         """查看群友接下来有什么课"""
         group_id = event.get_group_id()
         if not group_id or group_id not in self.user_data:
