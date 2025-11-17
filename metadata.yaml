@@ -1,5 +1,5 @@
-name: astrbot_plugin_CourseSchedule
+name: astrbot_plugin_CourseSchedule_rev
 desc: 一个用于绑定、查询和分享课程表的插件
-author: Jason.Joestar
+author: Jason.Joestar, Weedy233
 version: 1.1.3
-repo: https://github.com/advent259141/astrbot_plugin_CourseSchedule
+repo: https://github.com/Weedy233/astrbot_plugin_CourseSchedule
