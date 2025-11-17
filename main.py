@@ -399,7 +399,7 @@ class Main(Star):
         # 排序时，将无课的用户（start_time is None）排在最后
         next_courses.sort(key=lambda x: (x["start_time"] is None, x["start_time"]))
 
-        image_bytes = await self.image_generator.generate_schedule_image(next_courses)
+        image_bytes = await self.image_generator.generate_schedule_image(next_courses, date_type="today")
         yield event.image_result(image_bytes)
 
     @filter.command("群友明天上什么课")
@@ -473,7 +473,7 @@ class Main(Star):
         # 排序时，将无课的用户（start_time is None）排在最后
         next_courses.sort(key=lambda x: (x["start_time"] is None, x["start_time"]))
 
-        image_bytes = await self.image_generator.generate_schedule_image(next_courses)
+        image_bytes = await self.image_generator.generate_schedule_image(next_courses, date_type="tomorrow")
         yield event.image_result(image_bytes)
 
     @filter.command("本周上课排行")

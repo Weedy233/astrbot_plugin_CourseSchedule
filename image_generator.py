@@ -111,8 +111,14 @@ class ImageGenerator:
             tasks = [fetch_avatar(session, user_id) for user_id in user_ids]
             return await asyncio.gather(*tasks)
 
-    async def generate_schedule_image(self, courses: List[Dict]) -> str:
-        """生成课程表图片并返回临时文件路径"""
+    async def generate_schedule_image(self, courses: List[Dict], target_date: date = None, date_type: str = "today") -> str:
+        """生成课程表图片并返回临时文件路径
+
+        Args:
+            courses: 课程列表
+            target_date: 目标日期，默认为今天
+            date_type: 日期类型，"today", "tomorrow", 或自定义日期类型如"本周三"等
+        """
         height = c.GS_PADDING * 2 + 120 + len(courses) * c.GS_ROW_HEIGHT
         image = Image.new("RGB", (c.GS_WIDTH, height), c.GS_BG_COLOR)
         draw = ImageDraw.Draw(image)
@@ -121,9 +127,18 @@ class ImageGenerator:
             [c.GS_PADDING, c.GS_PADDING, c.GS_PADDING + 20, c.GS_PADDING + 60],
             fill="#26A69A",
         )
+
+        # 根据日期类型设置标题
+        if date_type == "today":
+            title = "“群友在上什么课?”"
+        elif date_type == "tomorrow":
+            title = "“群友明天上什么课?”"
+        else:
+            title = f"“群友{date_type}上什么课?”"
+
         draw.text(
             (c.GS_PADDING + 40, c.GS_PADDING),
-            "“群友在上什么课?”",
+            title,
             font=self.font_title,
             fill=c.GS_TITLE_COLOR,
         )
@@ -230,10 +245,22 @@ class ImageGenerator:
                         detail_text = f"{delta_minutes} 分钟后"
                 else:
                     status_text = "已结束"
-                    detail_text = "今日所有课程已结束"
+                    # 根据日期类型显示不同的结束提示
+                    if date_type == "today":
+                        detail_text = "今日所有课程已结束"
+                    elif date_type == "tomorrow":
+                        detail_text = "明天所有课程已结束"
+                    else:
+                        detail_text = f"{date_type}所有课程已结束"
             else:
                 status_text = "已结束"
-                detail_text = "今日所有课程已结束"
+                # 根据日期类型显示不同的无课提示
+                if date_type == "today":
+                    detail_text = "今日所有课程已结束"
+                elif date_type == "tomorrow":
+                    detail_text = "明天所有课程已结束"
+                else:
+                    detail_text = f"{date_type}所有课程已结束"
 
             text_x = arrow_x + 50
             nickname = self._sanitize_for_pil(nickname, self.font_main)
