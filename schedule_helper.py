@@ -1,7 +1,6 @@
 import os
 from datetime import datetime, timezone, timedelta
 
-from astrbot.api.event import AstrMessageEvent
 
 
 class ScheduleHelper:
@@ -33,11 +32,23 @@ class ScheduleHelper:
 
         target_courses = []
         for course in courses:
-            if course["start_time"].date() == target_date and course["start_time"] > datetime.now(timezone(timedelta(hours=8))):
-                target_courses.append(course)
+            if course["start_time"].date() == target_date:
+                # Only filter by current time for today
+                if target_date == datetime.now(timezone(timedelta(hours=8))).date():
+                    if course["start_time"] > datetime.now(timezone(timedelta(hours=8))):
+                        target_courses.append(course)
+                else:
+                    # For future dates, include all courses
+                    target_courses.append(course)
 
         if not target_courses:
-            return None, f"你{date_description.split('的')[-1]}没有课啦！"
+            # Map date_description to short form for error message
+            date_map = {
+                "的今日课程": "今天",
+                "的明日课程": "明天"
+            }
+            date_str = date_map.get(date_description)
+            return None, f"你{date_str}没有课啦！"
 
         # Sort courses by start time
         target_courses.sort(key=lambda x: x["start_time"])
@@ -54,7 +65,16 @@ class ScheduleHelper:
         return target_courses, None
 
     async def get_group_schedule_for_date(self, event, target_date, is_today=True):
-        """根据指定日期获取群友课程安排"""
+        """根据指定日期获取群友课程安排
+
+        Args:
+            event: 消息事件
+            target_date: 目标日期
+            is_today: 是否为今天，True时优先显示正在进行的课程，False时显示最早的课程
+
+        Returns:
+            tuple: (课程列表, 错误信息)
+        """
         group_id = event.get_group_id()
         if not group_id or group_id not in self.user_data:
             return None, "本群还没有人绑定课表哦。"

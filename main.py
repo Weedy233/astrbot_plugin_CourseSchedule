@@ -14,6 +14,7 @@ from .ics_parser import ICSParser
 from .image_generator import ImageGenerator
 from .schedule_helper import ScheduleHelper
 
+SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 class Main(Star):
     """课程表插件"""
@@ -214,8 +215,7 @@ class Main(Star):
     async def show_today_schedule(self, event: AstrMessageEvent):
         """查看今天还有什么课"""
         # 使用上海时区 (UTC+8)
-        shanghai_tz = timezone(timedelta(hours=8))
-        now = datetime.now(shanghai_tz)
+        now = datetime.now(SHANGHAI_TZ)
         today = now.date()
 
         courses, error_msg = await self.schedule_helper.get_schedule_for_date(event, today, "的今日课程")
@@ -233,8 +233,7 @@ class Main(Star):
     async def show_tomorrow_schedule(self, event: AstrMessageEvent):
         """查看明天还有什么课"""
         # 使用上海时区 (UTC+8)
-        shanghai_tz = timezone(timedelta(hours=8))
-        now = datetime.now(shanghai_tz)
+        now = datetime.now(SHANGHAI_TZ)
         tomorrow = now.date() + timedelta(days=1)
 
         courses, error_msg = await self.schedule_helper.get_schedule_for_date(event, tomorrow, "的明日课程")
@@ -252,8 +251,7 @@ class Main(Star):
     async def show_group_now_schedule(self, event: AstrMessageEvent):
         """查看群友接下来有什么课"""
         # 使用上海时区 (UTC+8)
-        shanghai_tz = timezone(timedelta(hours=8))
-        now = datetime.now(shanghai_tz)
+        now = datetime.now(SHANGHAI_TZ)
         today = now.date()
 
         next_courses, error_msg = await self.schedule_helper.get_group_schedule_for_date(event, today, is_today=True)
@@ -269,8 +267,7 @@ class Main(Star):
     async def show_group_tomorrow_schedule(self, event: AstrMessageEvent):
         """查看群友明天有什么课"""
         # 使用上海时区 (UTC+8)
-        shanghai_tz = timezone(timedelta(hours=8))
-        now = datetime.now(shanghai_tz)
+        now = datetime.now(SHANGHAI_TZ)
         tomorrow = now.date() + timedelta(days=1)  # 明天的日期
 
         next_courses, error_msg = await self.schedule_helper.get_group_schedule_for_date(event, tomorrow, is_today=False)
@@ -290,8 +287,7 @@ class Main(Star):
             yield event.plain_result("本群还没有人绑定课表哦。")
             return
 
-        shanghai_tz = timezone(timedelta(hours=8))
-        now = datetime.now(shanghai_tz)
+        now = datetime.now(SHANGHAI_TZ)
         today = now.date()
         start_of_week = today - timedelta(days=today.weekday())
         end_of_week = start_of_week + timedelta(days=6)

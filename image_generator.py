@@ -7,7 +7,7 @@ import os
 import tempfile
 from datetime import datetime, timezone, timedelta, date
 from io import BytesIO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
@@ -18,6 +18,40 @@ from . import constants as c
 
 class ImageGenerator:
     """图片生成器"""
+
+    @staticmethod
+    def process_avatar_data(avatar_data: bytes, avatar_size: int, allowed_formats: List[str] | None = None) -> Optional[Image.Image]:
+        """
+        处理头像数据
+
+        Args:
+            avatar_data: 头像数据字节
+            avatar_size: 头像尺寸
+            allowed_formats: 允许的图片格式列表
+
+        Returns:
+            处理后的头像图片对象，如果处理失败则返回None
+        """
+        if not avatar_data:
+            return None
+
+        if allowed_formats is None:
+            allowed_formats = ['JPEG', 'PNG', 'GIF', 'WEBP', 'BMP']
+
+        try:
+            image_stream = BytesIO(avatar_data)
+            buffer_size = image_stream.getbuffer().nbytes
+            if buffer_size > 0:
+                avatar = Image.open(image_stream)
+                avatar_format = avatar.format
+                if avatar_format in allowed_formats:
+                    avatar = avatar.convert("RGBA")
+                    avatar = avatar.resize((avatar_size, avatar_size), resample=Image.LANCZOS)
+                    return avatar
+        except Exception:
+            # 如果处理失败，返回None
+            pass
+        return None
 
     def __init__(self):
         self.font_path = self._find_font_file()
@@ -40,7 +74,7 @@ class ImageGenerator:
                 return os.path.join(plugin_dir, filename)
         return ""
 
-    def _load_font(self, size: int) -> ImageFont.FreeTypeFont:
+    def _load_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """加载指定大小的字体"""
         try:
             return (
@@ -75,7 +109,7 @@ class ImageGenerator:
         draw.pieslice([x1, y2 - radius * 2, x1 + radius * 2, y2], 90, 180, fill=fill)
         draw.pieslice([x2 - radius * 2, y2 - radius * 2, x2, y2], 0, 90, fill=fill)
 
-    async def _fetch_avatars(self, user_ids: List[str]) -> List[bytes]:
+    async def _fetch_avatars(self, user_ids: List[str]) -> List[Optional[bytes]]:
         """异步获取多个用户的头像"""
 
         async def fetch_avatar(session, user_id):
@@ -111,12 +145,11 @@ class ImageGenerator:
             tasks = [fetch_avatar(session, user_id) for user_id in user_ids]
             return await asyncio.gather(*tasks)
 
-    async def generate_schedule_image(self, courses: List[Dict], target_date: date = None, date_type: str = "today") -> str:
+    async def generate_schedule_image(self, courses: List[Dict], date_type: str = "today") -> str:
         """生成课程表图片并返回临时文件路径
 
         Args:
             courses: 课程列表
-            target_date: 目标日期，默认为今天
             date_type: 日期类型，"today", "tomorrow", 或自定义日期类型如"本周三"等
         """
         height = c.GS_PADDING * 2 + 120 + len(courses) * c.GS_ROW_HEIGHT
@@ -167,50 +200,24 @@ class ImageGenerator:
 
             avatar_data = avatar_datas[i]
             if avatar_data:
-                try:
-                    # 验证图片数据并打开图片
-                    image_stream = BytesIO(avatar_data)
-                    buffer_size = image_stream.getbuffer().nbytes
-                    if buffer_size > 0:
-                        # 尝试验证图片文件头，检查是否为有效图片
-                        image_stream.seek(0)  # 重置流位置
-                        image_stream.seek(0, 2)  # 移动到流末尾
-                        stream_size = image_stream.tell()  # 获取流大小
-                        image_stream.seek(0)  # 重置流位置到开始
-
-                        if stream_size > 0:
-                            avatar = Image.open(image_stream)
-                            avatar_format = avatar.format
-                            if avatar_format in ['JPEG', 'PNG', 'GIF', 'WEBP', 'BMP']:
-                                avatar = avatar.convert("RGBA")
-                                avatar = avatar.resize((c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE))
-                                mask = Image.new("L", (c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), 0)
-                                mask_draw = ImageDraw.Draw(mask)
-                                mask_draw.ellipse(
-                                    (0, 0, c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), fill=255
-                                )
-                                image.paste(
-                                    avatar,
-                                    (
-                                        c.GS_PADDING,
-                                        y_offset + (c.GS_ROW_HEIGHT - c.GS_AVATAR_SIZE) // 2,
-                                    ),
-                                    mask,
-                                )
-                            else:
-                                logger.debug(f"Unsupported image format for user {user_id}: {avatar_format}")
-                        else:
-                            logger.debug(f"Skipping avatar for user {user_id}: zero size image data")
-                    else:
-                        logger.debug(f"Skipping avatar for user {user_id}: empty image data after fetch")
-                except AssertionError as e:
-                    logger.warning(f"AssertionError when processing avatar for user {user_id}: {e}")
-                    # AssertionError 通常是图片数据损坏导致的，跳过头像显示
-                    pass
-                except Exception as e:
-                    logger.warning(f"Failed to process avatar for user {user_id}: {type(e).__name__} - {e}")
-                    # 如果处理头像失败，跳过头像显示，继续处理课程信息
-                    pass
+                avatar = self.process_avatar_data(avatar_data, c.GS_AVATAR_SIZE)
+                if avatar:
+                    # 为头像创建圆形遮罩
+                    mask = Image.new("L", (c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), 0)
+                    mask_draw = ImageDraw.Draw(mask)
+                    mask_draw.ellipse(
+                        (0, 0, c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), fill=255
+                    )
+                    image.paste(
+                        avatar,
+                        (
+                            c.GS_PADDING,
+                            y_offset + (c.GS_ROW_HEIGHT - c.GS_AVATAR_SIZE) // 2,
+                        ),
+                        mask,
+                    )
+                else:
+                    logger.debug(f"Skipping avatar for user {user_id}: failed to process avatar data")
             else:
                 logger.debug(f"No avatar data available for user {user_id}, skipping avatar display")
 
@@ -452,55 +459,25 @@ class ImageGenerator:
 
             avatar_data = avatar_datas[i]
             if avatar_data:
-                try:
-                    # 验证图片数据并打开图片
-                    image_stream = BytesIO(avatar_data)
-                    buffer_size = image_stream.getbuffer().nbytes
-                    if buffer_size > 0:
-                        # 尝试验证图片文件头，检查是否为有效图片
-                        image_stream.seek(0)  # 重置流位置
-                        image_stream.seek(0, 2)  # 移动到流末尾
-                        stream_size = image_stream.tell()  # 获取流大小
-                        image_stream.seek(0)  # 重置流位置到开始
-
-                        if stream_size > 0:
-                            avatar = Image.open(image_stream)
-                            avatar_format = avatar.format
-                            if avatar_format in ['JPEG', 'PNG', 'GIF', 'WEBP', 'BMP']:
-                                avatar = avatar.convert("RGBA")
-                                avatar = avatar.resize(
-                                    (c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE)
-                                )
-                                mask = Image.new(
-                                    "L", (c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), 0
-                                )
-                                mask_draw = ImageDraw.Draw(mask)
-                                mask_draw.ellipse(
-                                    (0, 0, c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), fill=255
-                                )
-                                image.paste(
-                                    avatar,
-                                    (
-                                        c.RANKING_PADDING + 100,
-                                        y_offset
-                                        + (c.RANKING_ROW_HEIGHT - c.RANKING_AVATAR_SIZE) // 2,
-                                    ),
-                                    mask,
-                                )
-                            else:
-                                logger.debug(f"Unsupported image format for user at index {i}: {avatar_format}")
-                        else:
-                            logger.debug(f"Skipping ranking avatar: zero size image data for user at index {i}")
-                    else:
-                        logger.debug(f"Skipping ranking avatar: empty image data after fetch for user at index {i}")
-                except AssertionError as e:
-                    logger.warning(f"AssertionError when processing ranking avatar for user at index {i}: {e}")
-                    # AssertionError 通常是图片数据损坏导致的，跳过头像显示
-                    pass
-                except Exception as e:
-                    logger.warning(f"Failed to process ranking avatar for user at index {i}: {type(e).__name__} - {e}")
-                    # 如果处理头像失败，跳过头像显示，继续处理排名信息
-                    pass
+                avatar = self.process_avatar_data(avatar_data, c.RANKING_AVATAR_SIZE)
+                if avatar:
+                    # 为头像创建圆形遮罩
+                    mask = Image.new("L", (c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), 0)
+                    mask_draw = ImageDraw.Draw(mask)
+                    mask_draw.ellipse(
+                        (0, 0, c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), fill=255
+                    )
+                    image.paste(
+                        avatar,
+                        (
+                            c.RANKING_PADDING + 100,
+                            y_offset
+                            + (c.RANKING_ROW_HEIGHT - c.RANKING_AVATAR_SIZE) // 2,
+                        ),
+                        mask,
+                    )
+                else:
+                    logger.debug(f"Skipping ranking avatar: failed to process avatar data for user at index {i}")
             else:
                 logger.debug(f"No avatar data available for user at index {i}, skipping ranking avatar display")
 
