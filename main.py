@@ -242,8 +242,7 @@ class Main(Star):
             yield event.plain_result(error_msg)
             return
 
-        image_path = await self.image_generator.generate_user_schedule_image(
-            courses, event.get_sender_name(), "的明日课程"
+        image_path = await self.image_generator.generate_user_schedule_image(courses, event.get_sender_name(), "的明日课程"
         )
         yield event.image_result(image_path)
 

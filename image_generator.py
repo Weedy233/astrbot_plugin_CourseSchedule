@@ -86,7 +86,7 @@ class ImageGenerator:
             logger.warning(f"无法加载字体文件: {self.font_path}，将使用默认字体。")
             return ImageFont.load_default()
 
-    def _sanitize_for_pil(self, text: str, font: ImageFont.FreeTypeFont) -> str:
+    def _sanitize_for_pil(self, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> str:
         """移除字体不支持的字符"""
         sanitized_text = ""
         for char in text:
@@ -108,6 +108,80 @@ class ImageGenerator:
         )
         draw.pieslice([x1, y2 - radius * 2, x1 + radius * 2, y2], 90, 180, fill=fill)
         draw.pieslice([x2 - radius * 2, y2 - radius * 2, x2, y2], 0, 90, fill=fill)
+
+    def _calculate_time_delta(self, start_time: datetime, end_time: datetime, now: datetime, date_type: str) -> tuple[str, str]:
+        """
+        计算课程时间状态和详细信息
+        
+        Args:
+            start_time: 课程开始时间
+            end_time: 课程结束时间
+            now: 当前时间
+            date_type: 日期类型 ("today", "tomorrow", 其他)
+            
+        Returns:
+            tuple: (状态文本, 详细信息文本)
+        """
+        if not start_time or not end_time:
+            return self._get_finished_status(date_type)
+        
+        # 计算完整的时间差，包括天数
+        total_seconds_start = int((start_time - now).total_seconds())
+        total_seconds_end = int((end_time - now).total_seconds())
+        
+        if total_seconds_start < 0 <= total_seconds_end:
+            # 课程进行中
+            status_text = "进行中"
+            remaining_minutes = total_seconds_end // 60
+            detail_text = self._format_duration(remaining_minutes, "剩余", "")
+        elif total_seconds_start > 0:
+            # 课程未开始
+            status_text = "下一节"
+            delta_minutes = total_seconds_start // 60
+            detail_text = self._format_duration(delta_minutes, "", "后")
+        else:
+            # 课程已结束
+            return self._get_finished_status(date_type)
+        
+        return status_text, detail_text
+    
+    def _format_duration(self, total_minutes: int, prefix: str = "", suffix: str = "") -> str:
+        """
+        格式化时间持续时间
+        
+        Args:
+            total_minutes: 总分钟数
+            prefix: 前缀文本
+            suffix: 后缀文本
+            
+        Returns:
+            格式化后的时间文本
+        """
+        if total_minutes > 60:
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            return f"{prefix}{hours} 小时 {minutes} 分钟{suffix}"
+        else:
+            return f"{prefix}{total_minutes} 分钟{suffix}"
+    
+    def _get_finished_status(self, date_type: str) -> tuple[str, str]:
+        """
+        获取已结束状态文本
+        
+        Args:
+            date_type: 日期类型
+            
+        Returns:
+            tuple: (状态文本, 详细信息文本)
+        """
+        status_text = "已结束"
+        if date_type == "today":
+            detail_text = "今日所有课程已结束"
+        elif date_type == "tomorrow":
+            detail_text = "明天所有课程已结束"
+        else:
+            detail_text = f"{date_type}所有课程已结束"
+        return status_text, detail_text
 
     async def _fetch_avatars(self, user_ids: List[str]) -> List[Optional[bytes]]:
         """异步获取多个用户的头像"""
@@ -195,8 +269,8 @@ class ImageGenerator:
             user_id = course.get("user_id", "N/A")
             nickname = course.get("nickname", user_id)
             summary = course.get("summary", "无课程信息")
-            start_time = course.get("start_time")
-            end_time = course.get("end_time")
+            start_time: datetime = course.get("start_time")
+            end_time: datetime = course.get("end_time")
 
             avatar_data = avatar_datas[i]
             if avatar_data:
@@ -230,44 +304,8 @@ class ImageGenerator:
             ]
             draw.polygon(arrow_points, fill="#BDBDBD")
 
-            status_text = ""
-            detail_text = ""
-
-            if start_time and end_time:
-                if start_time <= now < end_time:
-                    status_text = "进行中"
-                    remaining_minutes = (end_time - now).seconds // 60
-                    if remaining_minutes > 60:
-                        detail_text = f"剩余 {remaining_minutes // 60} 小时 {remaining_minutes % 60} 分钟"
-                    else:
-                        detail_text = f"剩余 {remaining_minutes} 分钟"
-                elif now < start_time:
-                    status_text = "下一节"
-                    delta_minutes = (start_time - now).seconds // 60
-                    if delta_minutes > 60:
-                        detail_text = (
-                            f"{delta_minutes // 60} 小时 {delta_minutes % 60} 分钟后"
-                        )
-                    else:
-                        detail_text = f"{delta_minutes} 分钟后"
-                else:
-                    status_text = "已结束"
-                    # 根据日期类型显示不同的结束提示
-                    if date_type == "today":
-                        detail_text = "今日所有课程已结束"
-                    elif date_type == "tomorrow":
-                        detail_text = "明天所有课程已结束"
-                    else:
-                        detail_text = f"{date_type}所有课程已结束"
-            else:
-                status_text = "已结束"
-                # 根据日期类型显示不同的无课提示
-                if date_type == "today":
-                    detail_text = "今日所有课程已结束"
-                elif date_type == "tomorrow":
-                    detail_text = "明天所有课程已结束"
-                else:
-                    detail_text = f"{date_type}所有课程已结束"
+            # 使用重构后的时间计算方法
+            status_text, detail_text = self._calculate_time_delta(start_time, end_time, now, date_type)
 
             text_x = arrow_x + 50
             nickname = self._sanitize_for_pil(nickname, self.font_main)
@@ -442,8 +480,8 @@ class ImageGenerator:
             rank_text = str(rank)
             try:
                 rank_bbox = self.font_rank.getbbox(rank_text)
-                rank_width = rank_bbox - rank_bbox
-                rank_height = rank_bbox - rank_bbox
+                rank_width = rank_bbox[2] - rank_bbox[0]
+                rank_height = rank_bbox[3] - rank_bbox[1]
             except (TypeError, ValueError):
                 rank_width = 10
                 rank_height = 10
@@ -497,7 +535,7 @@ class ImageGenerator:
 
             try:
                 duration_bbox = self.font_text.getbbox(duration_str)
-                duration_width = duration_bbox - duration_bbox
+                duration_width = duration_bbox[2] - duration_bbox[0]
             except (TypeError, ValueError):
                 duration_width = 100
             draw.text(
@@ -512,7 +550,7 @@ class ImageGenerator:
 
             try:
                 count_bbox = self.font_subtitle.getbbox(count_str)
-                count_width = count_bbox - count_bbox
+                count_width = count_bbox[2] - count_bbox[0]
             except (TypeError, ValueError):
                 count_width = 80
             draw.text(
