@@ -262,25 +262,21 @@ class Main(Star):
             yield event.plain_result(error_msg)
             return
 
+        image_bytes = await self.image_generator.generate_schedule_image(next_courses, date_type="today")
+        yield event.image_result(image_bytes)
+
         # 检查是否所有群友都没有课（即所有课程的start_time都是None）
         all_have_no_class = all(course["start_time"] is None for course in next_courses)
         if all_have_no_class:
             # 所有群友都没有课，发送庆祝消息
             celebration_messages = [
-                "今天的课程全部结束啦！",
+                "ķķ",
             ]
             import random
             celebration_message = random.choice(celebration_messages)
 
             # 发送庆祝消息
-            await event.send(celebration_message)
-
-            # 发送庆祝表情
-            celebration_face_ids = [287, 288, 14, 15]  # 常用庆祝表情ID
-            await self._send_multiple_faces(event, random.sample(celebration_face_ids, 2))  # 随机选择2个表情发送
-
-        image_bytes = await self.image_generator.generate_schedule_image(next_courses, date_type="today")
-        yield event.image_result(image_bytes)
+            yield event.plain_result(celebration_message)
 
     async def _send_multiple_faces(self, event, face_ids):
         """
