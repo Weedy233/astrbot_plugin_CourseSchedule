@@ -14,6 +14,9 @@ from .ics_parser import ICSParser
 from .image_generator import ImageGenerator
 from .schedule_helper import ScheduleHelper
 
+from astrbot.api.message_components import Face
+from astrbot.core.message.message_event_result import MessageChain
+
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 class Main(Star):
@@ -259,8 +262,40 @@ class Main(Star):
             yield event.plain_result(error_msg)
             return
 
+        # 检查是否所有群友都没有课（即所有课程的start_time都是None）
+        all_have_no_class = all(course["start_time"] is None for course in next_courses)
+        if all_have_no_class:
+            # 所有群友都没有课，发送庆祝消息
+            celebration_messages = [
+                "今天的课程全部结束啦！",
+            ]
+            import random
+            celebration_message = random.choice(celebration_messages)
+
+            # 发送庆祝消息
+            await event.send(celebration_message)
+
+            # 发送庆祝表情
+            celebration_face_ids = [287, 288, 14, 15]  # 常用庆祝表情ID
+            await self._send_multiple_faces(event, random.sample(celebration_face_ids, 2))  # 随机选择2个表情发送
+
         image_bytes = await self.image_generator.generate_schedule_image(next_courses, date_type="today")
         yield event.image_result(image_bytes)
+
+    async def _send_multiple_faces(self, event, face_ids):
+        """
+        发送多个QQ表情
+
+        Args:
+            event: 消息事件对象
+            face_ids: 表情ID列表
+        """
+        try:
+            faces_chain = [Face(id=face_id) for face_id in face_ids]
+            await event.send(MessageChain(chain=faces_chain))
+            print(f"已发送表情: {face_ids}")
+        except Exception as e:
+            print(f"发送表情失败: {e}")
 
     @filter.command("群友明天上什么课")
     async def show_group_tomorrow_schedule(self, event: AstrMessageEvent):
