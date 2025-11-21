@@ -277,6 +277,7 @@ class Main(Star):
 
             # 发送庆祝消息
             yield event.plain_result(celebration_message)
+            yield event.plain_result(celebration_message)
 
     async def _send_multiple_faces(self, event, face_ids):
         """
