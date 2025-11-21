@@ -7,7 +7,7 @@ import os
 import tempfile
 from datetime import datetime, timezone, timedelta, date
 from io import BytesIO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
@@ -18,6 +18,40 @@ from . import constants as c
 
 class ImageGenerator:
     """图片生成器"""
+
+    @staticmethod
+    def process_avatar_data(avatar_data: bytes, avatar_size: int, allowed_formats: List[str] | None = None) -> Optional[Image.Image]:
+        """
+        处理头像数据
+
+        Args:
+            avatar_data: 头像数据字节
+            avatar_size: 头像尺寸
+            allowed_formats: 允许的图片格式列表
+
+        Returns:
+            处理后的头像图片对象，如果处理失败则返回None
+        """
+        if not avatar_data:
+            return None
+
+        if allowed_formats is None:
+            allowed_formats = ['JPEG', 'PNG', 'GIF', 'WEBP', 'BMP']
+
+        try:
+            image_stream = BytesIO(avatar_data)
+            buffer_size = image_stream.getbuffer().nbytes
+            if buffer_size > 0:
+                avatar = Image.open(image_stream)
+                avatar_format = avatar.format
+                if avatar_format in allowed_formats:
+                    avatar = avatar.convert("RGBA")
+                    avatar = avatar.resize((avatar_size, avatar_size), resample=Image.LANCZOS)
+                    return avatar
+        except Exception:
+            # 如果处理失败，返回None
+            pass
+        return None
 
     def __init__(self):
         self.font_path = self._find_font_file()
@@ -40,7 +74,7 @@ class ImageGenerator:
                 return os.path.join(plugin_dir, filename)
         return ""
 
-    def _load_font(self, size: int) -> ImageFont.FreeTypeFont:
+    def _load_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """加载指定大小的字体"""
         try:
             return (
@@ -52,7 +86,7 @@ class ImageGenerator:
             logger.warning(f"无法加载字体文件: {self.font_path}，将使用默认字体。")
             return ImageFont.load_default()
 
-    def _sanitize_for_pil(self, text: str, font: ImageFont.FreeTypeFont) -> str:
+    def _sanitize_for_pil(self, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> str:
         """移除字体不支持的字符"""
         sanitized_text = ""
         for char in text:
@@ -75,7 +109,81 @@ class ImageGenerator:
         draw.pieslice([x1, y2 - radius * 2, x1 + radius * 2, y2], 90, 180, fill=fill)
         draw.pieslice([x2 - radius * 2, y2 - radius * 2, x2, y2], 0, 90, fill=fill)
 
-    async def _fetch_avatars(self, user_ids: List[str]) -> List[bytes]:
+    def _calculate_time_delta(self, start_time: datetime, end_time: datetime, now: datetime, date_type: str) -> tuple[str, str]:
+        """
+        计算课程时间状态和详细信息
+        
+        Args:
+            start_time: 课程开始时间
+            end_time: 课程结束时间
+            now: 当前时间
+            date_type: 日期类型 ("today", "tomorrow", 其他)
+            
+        Returns:
+            tuple: (状态文本, 详细信息文本)
+        """
+        if not start_time or not end_time:
+            return self._get_finished_status(date_type)
+        
+        # 计算完整的时间差，包括天数
+        total_seconds_start = int((start_time - now).total_seconds())
+        total_seconds_end = int((end_time - now).total_seconds())
+        
+        if total_seconds_start < 0 <= total_seconds_end:
+            # 课程进行中
+            status_text = "进行中"
+            remaining_minutes = total_seconds_end // 60
+            detail_text = self._format_duration(remaining_minutes, "剩余", "")
+        elif total_seconds_start > 0:
+            # 课程未开始
+            status_text = "下一节"
+            delta_minutes = total_seconds_start // 60
+            detail_text = self._format_duration(delta_minutes, "", "后")
+        else:
+            # 课程已结束
+            return self._get_finished_status(date_type)
+        
+        return status_text, detail_text
+    
+    def _format_duration(self, total_minutes: int, prefix: str = "", suffix: str = "") -> str:
+        """
+        格式化时间持续时间
+        
+        Args:
+            total_minutes: 总分钟数
+            prefix: 前缀文本
+            suffix: 后缀文本
+            
+        Returns:
+            格式化后的时间文本
+        """
+        if total_minutes > 60:
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            return f"{prefix}{hours} 小时 {minutes} 分钟{suffix}"
+        else:
+            return f"{prefix}{total_minutes} 分钟{suffix}"
+    
+    def _get_finished_status(self, date_type: str) -> tuple[str, str]:
+        """
+        获取已结束状态文本
+        
+        Args:
+            date_type: 日期类型
+            
+        Returns:
+            tuple: (状态文本, 详细信息文本)
+        """
+        status_text = "已结束"
+        if date_type == "today":
+            detail_text = "今日所有课程已结束"
+        elif date_type == "tomorrow":
+            detail_text = "明天所有课程已结束"
+        else:
+            detail_text = f"{date_type}所有课程已结束"
+        return status_text, detail_text
+
+    async def _fetch_avatars(self, user_ids: List[str]) -> List[Optional[bytes]]:
         """异步获取多个用户的头像"""
 
         async def fetch_avatar(session, user_id):
@@ -85,17 +193,39 @@ class ImageGenerator:
             try:
                 async with session.get(avatar_url) as response:
                     if response.status == 200:
-                        return await response.read()
+                        avatar_data = await response.read()
+                        if avatar_data:
+                            return avatar_data
+                        else:
+                            logger.warning(f"Failed to download avatar for {user_id}: Empty response from server")
+                            return None
+                    else:
+                        logger.warning(f"Failed to download avatar for {user_id}: HTTP {response.status}")
+                        return None
+            except aiohttp.ClientConnectorError as e:
+                logger.warning(f"Network connection error when fetching avatar for {user_id}: {e}")
+                return None
+            except aiohttp.ServerTimeoutError as e:
+                logger.warning(f"Server timeout when fetching avatar for {user_id}: {e}")
+                return None
+            except aiohttp.ClientResponseError as e:
+                logger.warning(f"HTTP response error when fetching avatar for {user_id}: {e.status} - {e.message}")
+                return None
             except Exception as e:
-                logger.error(f"Failed to download avatar for {user_id}: {e}")
-            return None
+                logger.warning(f"Unexpected error when fetching avatar for {user_id}: {type(e).__name__} - {e}")
+                return None
 
         async with aiohttp.ClientSession() as session:
             tasks = [fetch_avatar(session, user_id) for user_id in user_ids]
             return await asyncio.gather(*tasks)
 
-    async def generate_schedule_image(self, courses: List[Dict]) -> str:
-        """生成课程表图片并返回临时文件路径"""
+    async def generate_schedule_image(self, courses: List[Dict], date_type: str = "today") -> str:
+        """生成课程表图片并返回临时文件路径
+
+        Args:
+            courses: 课程列表
+            date_type: 日期类型，"today", "tomorrow", 或自定义日期类型如"本周三"等
+        """
         height = c.GS_PADDING * 2 + 120 + len(courses) * c.GS_ROW_HEIGHT
         image = Image.new("RGB", (c.GS_WIDTH, height), c.GS_BG_COLOR)
         draw = ImageDraw.Draw(image)
@@ -104,9 +234,18 @@ class ImageGenerator:
             [c.GS_PADDING, c.GS_PADDING, c.GS_PADDING + 20, c.GS_PADDING + 60],
             fill="#26A69A",
         )
+
+        # 根据日期类型设置标题
+        if date_type == "today":
+            title = "“群友在上什么课?”"
+        elif date_type == "tomorrow":
+            title = "“群友明天上什么课?”"
+        else:
+            title = f"“群友{date_type}上什么课?”"
+
         draw.text(
             (c.GS_PADDING + 40, c.GS_PADDING),
-            "“群友在上什么课?”",
+            title,
             font=self.font_title,
             fill=c.GS_TITLE_COLOR,
         )
@@ -130,26 +269,31 @@ class ImageGenerator:
             user_id = course.get("user_id", "N/A")
             nickname = course.get("nickname", user_id)
             summary = course.get("summary", "无课程信息")
-            start_time = course.get("start_time")
-            end_time = course.get("end_time")
+            start_time: datetime = course.get("start_time")
+            end_time: datetime = course.get("end_time")
 
             avatar_data = avatar_datas[i]
             if avatar_data:
-                avatar = Image.open(BytesIO(avatar_data)).convert("RGBA")
-                avatar = avatar.resize((c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE))
-                mask = Image.new("L", (c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), 0)
-                mask_draw = ImageDraw.Draw(mask)
-                mask_draw.ellipse(
-                    (0, 0, c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), fill=255
-                )
-                image.paste(
-                    avatar,
-                    (
-                        c.GS_PADDING,
-                        y_offset + (c.GS_ROW_HEIGHT - c.GS_AVATAR_SIZE) // 2,
-                    ),
-                    mask,
-                )
+                avatar = self.process_avatar_data(avatar_data, c.GS_AVATAR_SIZE)
+                if avatar:
+                    # 为头像创建圆形遮罩
+                    mask = Image.new("L", (c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), 0)
+                    mask_draw = ImageDraw.Draw(mask)
+                    mask_draw.ellipse(
+                        (0, 0, c.GS_AVATAR_SIZE, c.GS_AVATAR_SIZE), fill=255
+                    )
+                    image.paste(
+                        avatar,
+                        (
+                            c.GS_PADDING,
+                            y_offset + (c.GS_ROW_HEIGHT - c.GS_AVATAR_SIZE) // 2,
+                        ),
+                        mask,
+                    )
+                else:
+                    logger.debug(f"Skipping avatar for user {user_id}: failed to process avatar data")
+            else:
+                logger.debug(f"No avatar data available for user {user_id}, skipping avatar display")
 
             arrow_x = c.GS_PADDING + c.GS_AVATAR_SIZE + 20
             arrow_y = y_offset + c.GS_ROW_HEIGHT // 2
@@ -160,32 +304,8 @@ class ImageGenerator:
             ]
             draw.polygon(arrow_points, fill="#BDBDBD")
 
-            status_text = ""
-            detail_text = ""
-
-            if start_time and end_time:
-                if start_time <= now < end_time:
-                    status_text = "进行中"
-                    remaining_minutes = (end_time - now).seconds // 60
-                    if remaining_minutes > 60:
-                        detail_text = f"剩余 {remaining_minutes // 60} 小时 {remaining_minutes % 60} 分钟"
-                    else:
-                        detail_text = f"剩余 {remaining_minutes} 分钟"
-                elif now < start_time:
-                    status_text = "下一节"
-                    delta_minutes = (start_time - now).seconds // 60
-                    if delta_minutes > 60:
-                        detail_text = (
-                            f"{delta_minutes // 60} 小时 {delta_minutes % 60} 分钟后"
-                        )
-                    else:
-                        detail_text = f"{delta_minutes} 分钟后"
-                else:
-                    status_text = "已结束"
-                    detail_text = "今日所有课程已结束"
-            else:
-                status_text = "已结束"
-                detail_text = "今日所有课程已结束"
+            # 使用重构后的时间计算方法
+            status_text, detail_text = self._calculate_time_delta(start_time, end_time, now, date_type)
 
             text_x = arrow_x + 50
             nickname = self._sanitize_for_pil(nickname, self.font_main)
@@ -243,9 +363,9 @@ class ImageGenerator:
         return temp_path
 
     async def generate_user_schedule_image(
-        self, courses: List[Dict], nickname: str
+        self, courses: List[Dict], nickname: str, title_suffix: str = "的今日课程"
     ) -> str:
-        """为单个用户生成今日课程表图片"""
+        """为单个用户生成课程表图片"""
         height = c.US_PADDING * 2 + 100 + len(courses) * c.US_ROW_HEIGHT
         image = Image.new("RGB", (c.US_WIDTH, height), c.US_BG_COLOR)
         draw = ImageDraw.Draw(image)
@@ -253,7 +373,7 @@ class ImageGenerator:
         sanitized_nickname = self._sanitize_for_pil(nickname, self.user_font_title)
         draw.text(
             (c.US_PADDING, c.US_PADDING),
-            f"{sanitized_nickname}的今日课程",
+            f"{sanitized_nickname}{title_suffix}",
             font=self.user_font_title,
             fill=c.US_TITLE_COLOR,
         )
@@ -360,8 +480,8 @@ class ImageGenerator:
             rank_text = str(rank)
             try:
                 rank_bbox = self.font_rank.getbbox(rank_text)
-                rank_width = rank_bbox - rank_bbox
-                rank_height = rank_bbox - rank_bbox
+                rank_width = rank_bbox[2] - rank_bbox[0]
+                rank_height = rank_bbox[3] - rank_bbox[1]
             except (TypeError, ValueError):
                 rank_width = 10
                 rank_height = 10
@@ -377,26 +497,27 @@ class ImageGenerator:
 
             avatar_data = avatar_datas[i]
             if avatar_data:
-                avatar = Image.open(BytesIO(avatar_data)).convert("RGBA")
-                avatar = avatar.resize(
-                    (c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE)
-                )
-                mask = Image.new(
-                    "L", (c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), 0
-                )
-                mask_draw = ImageDraw.Draw(mask)
-                mask_draw.ellipse(
-                    (0, 0, c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), fill=255
-                )
-                image.paste(
-                    avatar,
-                    (
-                        c.RANKING_PADDING + 100,
-                        y_offset
-                        + (c.RANKING_ROW_HEIGHT - c.RANKING_AVATAR_SIZE) // 2,
-                    ),
-                    mask,
-                )
+                avatar = self.process_avatar_data(avatar_data, c.RANKING_AVATAR_SIZE)
+                if avatar:
+                    # 为头像创建圆形遮罩
+                    mask = Image.new("L", (c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), 0)
+                    mask_draw = ImageDraw.Draw(mask)
+                    mask_draw.ellipse(
+                        (0, 0, c.RANKING_AVATAR_SIZE, c.RANKING_AVATAR_SIZE), fill=255
+                    )
+                    image.paste(
+                        avatar,
+                        (
+                            c.RANKING_PADDING + 100,
+                            y_offset
+                            + (c.RANKING_ROW_HEIGHT - c.RANKING_AVATAR_SIZE) // 2,
+                        ),
+                        mask,
+                    )
+                else:
+                    logger.debug(f"Skipping ranking avatar: failed to process avatar data for user at index {i}")
+            else:
+                logger.debug(f"No avatar data available for user at index {i}, skipping ranking avatar display")
 
             nickname = self._sanitize_for_pil(data["nickname"], self.font_text)
             draw.text(
@@ -414,7 +535,7 @@ class ImageGenerator:
 
             try:
                 duration_bbox = self.font_text.getbbox(duration_str)
-                duration_width = duration_bbox - duration_bbox
+                duration_width = duration_bbox[2] - duration_bbox[0]
             except (TypeError, ValueError):
                 duration_width = 100
             draw.text(
@@ -429,7 +550,7 @@ class ImageGenerator:
 
             try:
                 count_bbox = self.font_subtitle.getbbox(count_str)
-                count_width = count_bbox - count_bbox
+                count_width = count_bbox[2] - count_bbox[0]
             except (TypeError, ValueError):
                 count_width = 80
             draw.text(
